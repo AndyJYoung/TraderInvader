@@ -1,5 +1,6 @@
 const router = require('express').Router()
 const dynamoClient = require('../dynamoClient')
+const axios = require('axios')
 
 /*
     Route: /games/:userid
@@ -34,6 +35,104 @@ router.get('/:userid', (req, res) => {
     })
 })
 
+/*
+    Route: /games/:userid
+    Method: GET
+    Purpose: This route is used to get all ACTIVE games
+        for a specific user
+    Query Parameters:
+        userid - user's username
+*/
+router.get('/:userid/active', async (req, res) => {
+    const params = {
+        TableName: 'Experimental',
+        KeyConditionExpression: 'username = :username and begins_with(identifier, :id)',
+        ExpressionAttributeValues: {
+            ':username': "user#" + req.params.userid,
+            ':id': 'portfolio'
+        },
+        ProjectionExpression: 'identifier'
+    }
+    
+    let data = await dynamoClient.query(params).promise();
+
+    let activeGameList = [];
+    let gameList = data.Items;
+
+    for (var game of gameList.map(item => item.identifier.split('#')[1]))
+    {
+        let params2 = {
+            TableName: 'Experimental',
+            Key: {
+                identifier: game,
+                username: 'game#active'
+            }
+        }
+
+        let data2 = await dynamoClient.get(params2).promise();
+ 
+        if (data2.Item != null)
+        {
+            activeGameList.push(data2.Item.identifier); 
+        }
+    }
+
+    res.send({
+        success: true,
+        msg: '',
+        data: activeGameList
+    })
+})
+
+/*
+    Route: /games/:userid
+    Method: GET
+    Purpose: This route is used to get all INACTIVE games
+        for a specific user
+    Query Parameters:
+        userid - user's username
+*/
+router.get('/:userid/inactive', async (req, res) => {
+    const params = {
+        TableName: 'Experimental',
+        KeyConditionExpression: 'username = :username and begins_with(identifier, :id)',
+        ExpressionAttributeValues: {
+            ':username': "user#" + req.params.userid,
+            ':id': 'portfolio'
+        },
+        ProjectionExpression: 'identifier'
+    }
+    
+    let data = await dynamoClient.query(params).promise();
+
+    let activeGameList = [];
+    let gameList = data.Items;
+
+    for (var game of gameList.map(item => item.identifier.split('#')[1]))
+    {
+        let params2 = {
+            TableName: 'Experimental',
+            Key: {
+                identifier: game,
+                username: 'game#inactive'
+            }
+        }
+
+        let data2 = await dynamoClient.get(params2).promise();
+ 
+        if (data2.Item != null)
+        {
+            activeGameList.push(data2.Item.identifier); 
+        }
+    }
+
+    res.send({
+        success: true,
+        msg: '',
+        data: activeGameList
+    })
+})
+
 router.get('/:gameid/info', async (req, res) => {
     try {
         let params = {
@@ -63,8 +162,61 @@ router.get('/:gameid/info', async (req, res) => {
         }
 
         data = await dynamoClient.query(params).promise()
+        
+        let allStocks = []
 
-        resData.portfolios = data.Items
+        data.Items.forEach(item => {
+            allStocks = [...allStocks, ...Object.keys(item.stocks)]
+        })
+
+        let uniqueStocks = [...new Set(allStocks)]
+        let stockData = {}
+        
+        if(uniqueStocks.length === 1)
+        {
+            const { data } = await axios.get(`https://financialmodelingprep.com/api/v3/stock/real-time-price/${uniqueStocks[0]}?apikey=${process.env.API_KEY}`)
+            
+            stockData[data.symbol] = data.price
+        }
+        else if(uniqueStocks.length !== 0)
+        {
+            const stockNames = uniqueStocks.join(',')
+            const { data } = await axios.get(`https://financialmodelingprep.com/api/v3/stock/real-time-price/${stockNames}?apikey=${process.env.API_KEY}`)
+
+            data.companiesPriceList.forEach(item => stockData[item.symbol] = item.price)
+        }
+
+        let scoreboard = []
+
+        data.Items.forEach(item => {
+            let temp = {}
+            let stockValue = 0
+
+            temp.username = item.username.split('#')[1]
+
+            let localStocks = Object.entries(item.stocks)
+            
+            if(item.wallet === undefined)
+                item.wallet = 0
+                
+            if(localStocks.length === 0) {
+                temp.wallet = item.wallet
+                temp.portfolio = 0
+                temp.total = item.wallet
+            }
+            else {
+                localStocks.forEach(stock => stockValue += stockData[stock[0]] * stock[1].count)
+
+                temp.wallet = item.wallet
+                temp.portfolio = stockValue
+                temp.total = item.wallet + stockValue
+            }
+
+            console.log({item, temp})
+            scoreboard.push(temp)
+        })
+
+        resData.scoreboard = scoreboard
 
         res.send({
             success: true,
@@ -130,10 +282,11 @@ router.get('/:gameid/portfolios/:userid', async (req, res) => {
 router.get('/:gameid/portfolios/', (req, res) => {
     const params = {
         TableName: 'Experimental',
-        IndexName: 'gameid-index',
-        KeyConditionExpression: 'gameid = :gameid',
+        IndexName: 'game-index',
+        KeyConditionExpression: 'GSI_PK = :gameid AND GSI_SK = :portfolio',
         ExpressionAttributeValues: {
-            ':gameid': req.params.gameid
+            ':gameid': req.params.gameid,
+            ':portfolio': 'portfolio#' + req.params.gameid
         },
         ProjectionExpression: 'stocks, username, wallet'
     }
@@ -159,8 +312,6 @@ router.get('/:gameid/portfolios/', (req, res) => {
         winCondition - A boolean saying what the win condition is
         wallet - A number saying how much money each player gets
             at the start of the game
-        users - An array containing the users in the game (probably
-            just the user that created it)
         endTime - A date respented as an EPOCH timestamp (number)
 */
 router.post('/:gameid', (req, res) => {
@@ -171,7 +322,6 @@ router.post('/:gameid', (req, res) => {
             identifier: req.params.gameid,
             winCondition: req.body.winCondition,
             wallet: req.body.wallet,
-            users: req.body.users,
             endTime: req.body.endTime,
             GSI_PK: req.params.gameid,
             GSI_SK: "game#active"
@@ -228,18 +378,8 @@ router.put('/:gameid/users/:userid', async (req, res) => {
         }
     
         await dynamoClient.put(params).promise()
-        
-        params = {
-            TableName: 'Experimental',
-            Key: {
-                username: 'game#active',
-                identifier: req.params.gameid
-            },
-            UpdateExpression: 'SET users = list_append(users, :user)',
-            ExpressionAttributeValues: {
-                ':user': [req.params.userid]
-            }
-        }
+
+        await dynamoClient.update(params).promise()
 
         res.send({
             success: true,
@@ -283,10 +423,15 @@ router.put('/:gameid/portfolios/:userid/buy', async (req, res) => {
 
         let { Item } = await dynamoClient.get(params).promise()
 
-        if(Item.stocks[symbol])
-            Item.stocks[symbol] += count
+        if(Item.stocks[symbol]) {
+            Item.stocks[symbol].count += count
+            Item.stocks[symbol].purchased = value
+        }
         else
-            Item.stocks[symbol] = count
+            Item.stocks[symbol] = {
+                purchased: value,
+                count
+            }
 
         if(Item.wallet - (count * value) < 0) {
             let err = { message: 'Insufficient funds' }
@@ -355,7 +500,7 @@ router.put('/:gameid/portfolios/:userid/sell', async (req, res) => {
                 throw err
             }
             else 
-                Item.stocks[symbol] -= count
+                Item.stocks[symbol].count -= count
         }
         else {
             const err = { message: 'Don\'t own this symbol' }

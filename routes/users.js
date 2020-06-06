@@ -26,38 +26,50 @@ router.post('/', async (req, res) => {
             }]
         }
 
-        console.log('making user')
+        await cognito.signUp(params).promise()
 
-        let response = await cognito.signUp(params).promise()
-
-        console.log('adding friends')
         params = {
-            TableName: 'Experimental',
-            Item: {
-                username: 'user#' + req.body.username,
-                identifier: 'requests',
-                friends: []
+            RequestItems: {
+                'Experimental': [
+                    {
+                        PutRequest: {
+                            Item: {
+                                username: 'user#' + req.body.username,
+                                identifier: 'requests',
+                                friends: []
+                            }
+                        }
+                    },
+                    {
+                        PutRequest: {
+                            Item: {
+                                username: 'user#' + req.body.username,
+                                identifier: 'invites',
+                                games: []
+                            }
+                        }
+                    }
+                ],
+                'PlayerStats': [
+                    {
+                        PutRequest: {
+                            Item: {
+                                username: req.body.username,
+                                Achievements: {},
+                                Statistics: {
+                                    numberOfWins: 0,
+                                    numberOfLosses: 0,
+                                    currentWinStreak: 0,
+                                    currentLossStreak: 0
+                                }
+                            }
+                        }
+                    }
+                ]
             }
         }
 
-        await dynamoClient.put(params).promise()
-
-        console.log('creating statistics')
-        params = {
-            TableName: 'Statistics',
-            Item: {
-                username: req.body.username,
-                Achievements: {},
-                Statistics: {
-                    numberOfWins: 0,
-                    numberOfLosses: 0,
-                    currentWinStreak: 0,
-                    currentLossStreak: 0
-                }
-            }
-        }
-
-        await dynamoClient.put(params).promise
+        await dynamoClient.batchWrite(params).promise()
 
         res.send({
             success: true,
@@ -69,6 +81,46 @@ router.post('/', async (req, res) => {
         res.send({
             success: false,
             msg: err.message,
+            data: {}
+        })
+    }
+})
+
+/*
+    Route: /users/list
+    Method: GET
+    Purpose: This route returns a list
+        of usernames that begin with the given
+        username segment
+    Query Parameters:
+        segment - the beginning of a username
+        limit - the number of users to retrieve
+*/
+router.get('/list', async (req, res) => {
+    try {
+        let segment = req.query.segment || ''
+        let limit = req.query.limit
+
+        const params = {
+            UserPoolId: process.env.COGNITO_POOL_ID,
+            Limit: limit || 10,
+            Filter: `username ^= \"${segment}\"`
+        }
+
+        let { Users } = await cognito.listUsers(params).promise()
+
+        Users = Users.filter(user => user.UserStatus === 'CONFIRMED').map(user => user.Username)
+
+        res.send({
+            success: true,
+            message: 'Usernames retrieved',
+            data: Users
+        })
+    }
+    catch(err) {
+        res.send({
+            success: false,
+            message: err.message,
             data: {}
         })
     }
@@ -483,9 +535,26 @@ router.put('/:userid/friends/:friendid', async (req, res) => {
 
         data = await dynamoClient.put(params).promise()
 
+        params = {
+            TableName: 'Experimental',
+            Key: {
+                username: 'user#' + req.params.friendid,
+                identifier: 'requests'
+            },
+            UpdateExpression: 'SET friends = list_append(friends, :friend)',
+            ExpressionAttributeValues: {
+                ':friend': [{
+                    name: req.params.userid,
+                    confirmed: true
+                }]
+            }
+        }
+
+        await dynamoClient.update(params).promise()
+
         res.send({
             success: true,
-            message: '',
+            message: 'Friend confirmed',
             data
         })
     }
@@ -494,6 +563,179 @@ router.put('/:userid/friends/:friendid', async (req, res) => {
         res.send({
             success: false,
             message: 'Error confirming user',
+            data: {}
+        })
+    }
+})
+
+/*
+    Route: /users/:userid/requests/:friendid
+    Method: DELETE
+    Purpose: This route is used to remove a 
+        friend requests from a user's friend
+        request list
+    Request Parameters: 
+        userid - userid of the user you're 
+            removing a request for
+        friendid - the name of the request
+            to be removed
+*/
+router.delete('/:userid/requests/:friendid', async (req, res) => {
+    try {
+        let params = {
+            TableName: 'Experimental',
+            Key: {
+                username: 'user#' + req.params.userid,
+                identifier: 'requests'
+            }
+        }
+
+        const { Item } = await dynamoClient.get(params).promise()
+
+        Item.friends = Item.friends.filter(item => item.name != req.params.friendid)
+
+        params = {
+            TableName: 'Experimental',
+            Item
+        }
+
+        await dynamoClient.put(params).promise()
+
+        res.send({
+            success: true,
+            message: 'Friend request deleted',
+            data: Item
+        })
+    }
+    catch (err) {
+        res.send({
+            success: false,
+            message: err.message,
+            data: {}
+        })
+    }
+})
+
+/*
+    Route: /users/:userid/invites/:gameid
+    Method: POST
+    Purpose: This route is used to invite a 
+        user to a given game
+    Request Parameters: 
+        userid - userid of the user you're 
+            sending the invite to
+        gameid - the game you're sending the 
+            invite for
+*/
+router.post('/:userid/invites/:gameid', async (req, res) => {
+    try {
+        let params = {
+            TableName: 'Experimental',
+            Key: {
+                username: 'user#' + req.params.userid,
+                identifier: 'invites'
+            },
+            UpdateExpression: 'SET games = list_append(games, :id)',
+            ExpressionAttributeValues: {
+                ':id': [req.params.gameid]
+            }
+        }
+
+        await dynamoClient.update(params).promise()
+
+        res.send({
+            success: true,
+            message: 'Invite added',
+            data: {}
+        })
+    }
+    catch (err) {
+        res.send({
+            success: false,
+            message: err.message,
+            data: {}
+        })
+    }
+})
+
+/*
+    Route: /users/:userid/invites
+    Method: GET
+    Purpose: This route is used to get
+        all invites for a given user
+    Request Parameters:
+        userid - username of the user
+            whose invites you're retrieving
+*/
+router.get('/:userid/invites', async (req, res) => {
+    try {
+        const params = {
+            TableName: 'Experimental',
+            Key: {
+                username: 'user#' + req.params.userid,
+                identifier: 'invites'
+            }
+        }
+
+        const { Item } = await dynamoClient.get(params).promise()
+
+        res.send({
+            success: true,
+            message: 'Invites retrieved',
+            data: Item.games
+        })
+    }
+    catch(err) {
+        res.send({
+            success: false,
+            message: err.message,
+            data: {}
+        })
+    }
+})
+
+/*
+    Route: /users/:userid/invites/:gameid
+    Method: POST
+    Purpose: This route is used to invite a 
+        user to a given game
+    Request Parameters: 
+        userid - userid of the user you're 
+            sending the invite to
+        gameid - the game you're sending the 
+            invite for
+*/
+router.delete('/:userid/invites/:gameid', async (req, res) => {
+    try {
+        let params = {
+            TableName: 'Experimental',
+            Key: {
+                username: 'user#' + req.params.userid,
+                identifier: 'invites'
+            }
+        }
+
+        const { Item } = await dynamoClient.get(params).promise()
+
+        Item.games = Item.games.filter(item => item != req.params.gameid)
+        
+        params = {
+            TableName: 'Experimental',
+            Item
+        }
+
+        await dynamoClient.put(params).promise()
+
+        res.send({
+            success: true,
+            message: 'Invite removed',
+            data: {}
+        })
+    }
+    catch (err) {
+        res.send({
+            success: false,
+            message: err.message,
             data: {}
         })
     }
